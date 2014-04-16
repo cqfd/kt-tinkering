@@ -7,11 +7,7 @@
 
 (enable-console-print!)
 
-(def app-state (atom {:list [] :idx 0}))
-
-(defn yts->movie [m]
-  {:title (m "MovieTitleClean")
-   :magnet (m "TorrentMagnetUrl")})
+(def app-state (atom {:movies [] :idx 0}))
 
 (defn tick [ms]
   (let [out (chan (sliding-buffer 1))]
@@ -20,27 +16,27 @@
           (>! out :tick)))
     out))
 
-;; Lots of different ways to throttle...
 (defn throttle [t c]
   (let [out (chan)]
     (go (loop [throttled true]
           (if throttled
-            (do (println "Currently throttled...")
-                (<! t)
-                (println "Just got unthrottled...")
-                (recur false))
-            (do (println "Currently unthrottled...")
-                (>! out (<! c))
-                (println "Just got throttled...")
-                (recur true)))))
+            (do (<! t) (recur false))
+            (do (>! out (<! c)) (recur true)))))
     out))
+
+(defn yts->movie [m]
+  {:title (m "MovieTitle")
+   :magnet (m "TorrentMagnetUrl")
+   :size (m "Size")
+   :seeds (m "TorrentSeeds")
+   :quality (m "Quality")})
 
 (defn yts [params]
   (let [ch (chan)]
+    (println "Trying to search yts:" params)
     (GET "http://yts.re/api/list.json"
          {:params params
-          :handler (fn [resp]
-                     (put! ch (map yts->movie (resp "MovieList"))))})
+          :handler (fn [resp] (put! ch (mapv yts->movie (resp "MovieList"))))})
     ch))
 
 (defn video-widget [data owner]
@@ -60,31 +56,29 @@
      (init-state [_]
        {:text ""
         :query (chan (sliding-buffer 1))
-        :throttle (chan (sliding-buffer 1))})
+        :throttle (chan)})
      om/IWillMount
      (will-mount [this]
-       (let [state (om/get-state owner)]
+       (let [state (om/get-state owner)
+             query (throttle (:throttle state) (:query state))]
          (go (while true
-               (let [_ (println "Waiting for a search string...")
-                     search (<! (throttle (:throttle state) (:query state)))
-                     _ (println "Just got a search string:" search)
-                     movies (<! (yts {:limit 20 :sort "seeds" :keywords search}))]
-                 (println "Got some movies!")
-                 (om/update! app :list (vec movies)))))))
+               (let [movies (<! (yts {:limit 20 :sort "seeds" :keywords (<! query)}))]
+                 (om/update! app :movies movies))))))
      om/IRenderState
      (render-state [this state]
        (dom/div nil
-         (dom/button #js {:onClick (fn [e] (put! (:throttle state) :please-continue))})
+         (dom/button #js {:onClick (fn [e] (put! (:throttle state) :please-continue))} "unthrottle")
          (dom/input #js {:type "text"
                          :value (:text state)
                          :onChange (fn [e]
+                                     (println "Search box changed!")
                                      (om/set-state! owner :text (.. e -target -value))
                                      (put! (:query state) (.. e -target -value)))})
          (apply dom/ul nil
                 (map-indexed (fn [i movie]
                                (dom/li #js {:className (when (= i (:idx app)) "selected")
                                             :onClick (fn [e] (om/update! app :idx i))}
-                                       (:title movie)))
-                             (:list app)))))))
+                                       (str (:title movie) " " (:quality movie) " " (:size movie) " " (:seeds movie))))
+                             (:movies app)))))))
  app-state
  {:target (. js/document (getElementById "app"))})
